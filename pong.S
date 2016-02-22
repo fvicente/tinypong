@@ -24,11 +24,11 @@
 ;
 ;                      ATtiny45
 ;                  +-----------------+
+;              __  |                 |
+; BUTTON +5V --||--| 1 (PB5) (VCC) 8 |---- +5V
 ;                  |                 |
-;           IN ----| 1 (PB5) (VCC) 8 |---- +5V
-;    22pf          |                 |
 ;  +--||----+------| 2 (PB3) (PB2) 7 |---- HSYNC
-;  |       [ ] XTAL|                 |
+;  | 22pf  [ ] XTAL|                 |
 ;  +--||----+------| 3 (PB4) (PB1) 6 |---- VSYNC
 ;  | 22pf          |                 |
 ;  +---------------| 4 (GND) (PB0) 5 |---- RGB
@@ -38,17 +38,17 @@
 
 #define __SFR_OFFSET 0 /* needed to subtract 0x20 from I/O addresses */
 
-#define HSYNC		2
-#define VSYNC		1
-#define RGB			0
-#define INPUT		5
-#define PORT		_SFR_IO_ADDR(PORTB)
+#define HSYNC        2
+#define VSYNC        1
+#define RGB          0
+#define INPUT        5
+#define PORT        _SFR_IO_ADDR(PORTB)
 
 #include <avr/io.h>
 
-	.global main
-	.global maplines
-	.global numtable
+    .global main
+    .global maplines
+    .global numtable
 
 ; VGA timing from http://en.wikipedia.org/wiki/Video_Graphics_Array
 ;
@@ -191,6 +191,14 @@
 ; 0x006A = random offset for left paddle
 ; 0x006B = random offset for right paddle
 
+; MACROS
+.macro delay3x val
+	ldi r16, \val
+1:
+	dec r16
+	brne 1b
+.endm
+
 main:
 	; Initialize stack
 
@@ -205,9 +213,10 @@ main:
 
 	; Initialize ports
 
-	sbi DDRB, 0x00	; output
-	sbi DDRB, 0x01	; output
-	sbi DDRB, 0x02	; output
+	sbi _SFR_IO_ADDR(DDRB), 0x00	; output
+	sbi _SFR_IO_ADDR(DDRB), 0x01	; output
+	sbi _SFR_IO_ADDR(DDRB), 0x02	; output
+	cbi _SFR_IO_ADDR(DDRB), INPUT	; make input
 
 	; RGB off
 	cbi PORT, RGB		; cbi = 2 clocks
@@ -260,7 +269,18 @@ main:
 	ldi r16, 0x88
 	sts 0x0061, r16		; random
 	sts 0x0062, r22		; set default ball flags direction right, down, speed normal
-	; TODO: TESTS going left
+	ldi r16, 0x01
+	sts 0x0063, r16		; starting angle 1 = 22.5 degrees
+
+	; clear SRAM from 0x0064 to 0x0094
+	clr r31				; clear Z high byte
+	ldi r30, 0x64		; set Z low byte
+	ldi r16, 0x31
+zeromem:
+	st Z+, r22			; zero
+	dec r16
+	brne zeromem
+
 	ldi r16, 0x00
 	sts 0x0062, r16		; set default ball flags direction right, down, speed normal
 	ldi r16, 0x02
@@ -317,8 +337,9 @@ vzone:
 	cpi r21, 0x0B
 	breq vpulseoff		; line 12 of the blanking zone
 
-	nop
-	rjmp fp6togo
+	cpi r21, 0x0A
+	brne fp6togo
+	rjmp chkinput		; line 11 of the blanking zone, check input button
 
 vpulseon:
 	sbi PORT, VSYNC		; sbi = 2 clocks
@@ -399,7 +420,63 @@ dashoff:
 	nop
 
 dashend:
-	; 25 cycles used
+	; draw scores
+	cpi r27, 0x08
+	brsh noscore
+
+	; left score
+	mov r16, r28
+	swap r16
+	andi r16, 0xF0
+	add r16, r27
+	ldi ZL, lo8(numtable)
+	ldi ZH, hi8(numtable)
+	add ZL, r16
+	adc ZH, r22
+	lpm
+	or r6, r0
+	ldi r16, 0x08
+	add ZL, r16
+	adc ZH, r22
+	lpm
+	or r7, r0
+
+	; right score
+	mov r16, r29
+	swap r16
+	andi r16, 0xF0
+	add r16, r27
+	ldi ZL, lo8(numtable)
+	ldi ZH, hi8(numtable)
+	add ZL, r16
+	adc ZH, r22
+	lpm
+	or r9, r0
+	ldi r16, 0x08
+	add ZL, r16
+	adc ZH, r22
+	lpm
+	or r10, r0
+	rjmp drawball
+
+noscore:
+	delay3x 0x0D
+
+drawball:
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	; 74 cycles used
+
+	; HSYNC pulse off
+	cbi PORT, HSYNC		; cbi = 2 clocks
+
+	; Back porch 1.89 µs = 37.8 cycles
+	; We use the back porch cycles to determine if we need to draw a blank line or a number line
+
 	; r16 = r25 / 8
 	mov r16, r25
 	lsr r16
@@ -408,9 +485,6 @@ dashend:
 	; r18 = int(r25 / 8) * 8 ; to achieve this we clear bits 0, 1 and 2
 	mov r17, r25
 	cbr r17, 0xF8
-	nop
-	nop
-	nop
 	; get the mask according to r17
 	ldi ZL, lo8(pm(masktable))
 	ldi ZH, hi8(pm(masktable))
@@ -443,7 +517,6 @@ paintx:
 	cp r26, r27
 	brne paintpads
 
-	; 45 cycles used
 	ldi ZL, lo8(pm(regtable))
 	ldi ZH, hi8(pm(regtable))
 	; 2 instructions for each case in regtable, multiply r16 * 2
@@ -485,18 +558,9 @@ regtable:
 	rjmp endpaint
 
 paintpads:
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x03
 
 endpaint:
-	; 57 cycles used
 	ldi r17, 0x05 ; paddle size
 lpad:
 	; left paddle
@@ -520,118 +584,18 @@ rpad:
 	nop
 	nop
 	nop
-	rjmp hsyncoff
+	rjmp line
 chkrpad:
 	ldi r18, 0x0C
 	cp r17, r16
-	brlo hsyncoff
+	brlo line
 	or r15, r18
-
-hsyncoff:
-	; 74 cycles used - we will need to get the last line during the back porch
-
-	; HSYNC pulse off
-	cbi PORT, HSYNC		; cbi = 2 clocks
-
-	; Back porch 1.89 µs = 37.8 cycles
-	; We use the back porch cycles to determine if we need to draw a blank line or a number line
-
-	; draw scores
-	cpi r27, 0x08
-	brsh noscore
-
-	; left score
-	mov r16, r28
-	lsl r16
-	lsl r16
-	lsl r16
-	lsl r16
-	add r16, r27
-	ldi ZL, lo8(numtable)
-	ldi ZH, hi8(numtable)
-	add ZL, r16
-	adc ZH, r22
-	lpm
-	or r6, r0
-	ldi r16, 0x08
-	add ZL, r16
-	adc ZH, r22
-	lpm
-	or r7, r0
-
-	; right score
-	mov r16, r29
-	lsl r16
-	lsl r16
-	lsl r16
-	lsl r16
-	add r16, r27
-	ldi ZL, lo8(numtable)
-	ldi ZH, hi8(numtable)
-	add ZL, r16
-	adc ZH, r22
-	lpm
-	; 38 cycles already! lets use some cycles from the line itself
-	or r9, r0
-	ldi r16, 0x08
-	add ZL, r16
-	adc ZH, r22
-	lpm
-	or r10, r0
-	rjmp linestart
-
-noscore:
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
 
 line:
 	;
 	; Draw a line of pixels total: 25.17 µs * 20 = 503.4 cycles
 	;
-
 	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-
-linestart:
 	in r16, PORT
 
 	; r1 bit 0
@@ -1241,29 +1205,17 @@ linestart:
 	nop
 	nop
 	out PORT, r16
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x02
 	nop
 	rjmp loop
 
 moveball:
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x02
 	; Sync pulse length 3.77 µs = 75.4 cycles
 	; HSYNC pulse on
 	sbi PORT, HSYNC		; sbi = 2 clocks
-	ldi r16, 0x18
-loopmb:
-	dec r16
-	brne loopmb
+
+	delay3x 0x18
 	; HSYNC pulse off
 	cbi PORT, HSYNC		; cbi = 2 clocks
 	; Back porch 37.8 cycles + draw line 503.4 cycles
@@ -1278,21 +1230,7 @@ loopmb:
 	inc r17
 	cpi r17, 0x78	; 120 (2 seconds)
 	brsh timeout
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x05
 	rjmp saveandcontinue
 timeout:
 	ldi r17, 0x00
@@ -1329,76 +1267,54 @@ looppause:
 	rjmp loop
 
 playthegame:
-	; Calculate ball's new location. Bresenham's algorithm is used to determine the next
-	; position of the ball in the screen
-	lds r16, 0x0063	; current angle
-	; Calculate ending coordinates (x1, y1) according to the angle
-	ldi ZL, lo8(pm(incy1))
-	ldi ZH, hi8(pm(incy1))
-	lsl r16 ; multiply by 2
-	add ZL, r16
+	; r16 = the quantity to increment (or decrement) the ball position in the X axis
+	; r17 = the quantity to increment (or decrement) the ball position in the Y axis
+	; r18 = aux
+	; r19 = aux
+	; Calculate ball's new location.
+	lds r18, 0x0063	; current angle
+	ldi ZL, lo8(pm(anglejmp))
+	ldi ZH, hi8(pm(anglejmp))
+	add ZL, r18
 	adc ZH, r22
+	nop
+	; 10 CYCLES from here to hmove
 	ijmp
-incy1:
-	ldi r17, 0x0
-	rjmp incx1
-	ldi r17, 0x19
-	rjmp incx1
-	ldi r17, 0x32
-	rjmp incx1
-	ldi r17, 0x4B
-	rjmp incx1
-incx1:
-	ldi r16, 0x01
-	; r17: dy = y1 - y0
-	mov r18, r17
-	nop
-	nop
-	; we will use r17 to keep the increment step over the Y axis
-	ldi r17, 0x00
-	; r18: (2 * dy)
-	lsl r18
-	; r19: dx = x1 - x0, which will be always 0x32
-	ldi r19, 0x32
-	; r19: d = dx - (2 * dy)
-	sub r19, r18
-	; if d < 0
-	cpi r19, 0x40 ; check if result is negative
-	brsh negdif
-	; d = d - (2 * dy)
-	sub r19, r18
-	nop
-	nop
-	nop
-	rjmp checkspeed
-negdif:
-	ldi r17, 0x01
-	; d = d + (2 * dx) - (2 * dy);
-	; note that dx will always be 0x32, so 2 * 0x32 = 0x64
-	ldi r16, 0x64
-	add r19, r16
-	sub r19, r18
-	ldi r16, 0x01
-checkspeed:
-	; if speed is fast, repeat Bresenham's algorithm one more time
-	lds r19, 0x0062	; ball flags
-	andi r19, 0x04
-	cpi r19, 0x04
-	breq fastpos
-	; slow speed
-	nop
+
+anglejmp:
+	rjmp angle0
+	rjmp angle225
+	rjmp angle45
+	rjmp angle675
+
+angle0:
+	ldi r16, 1		; X offset
+	ldi r17, 0		; Y offset
 	nop
 	nop
 	rjmp vmove
-fastpos:
-	inc r16
-	; if d < 0
-	cpi r19, 0x40	; check if result is negative
-	brsh fastincpos
+
+angle225:
+	ldi r16, 1		; X offset
+	ldi r17, 0		; Y offset
+	sbrc r25, 0		; r26 & 1 (even or odd)
+	ldi r17, 1		; Y offset
 	rjmp vmove
-fastincpos:
-	; y = y + 1
-	inc r17
+
+angle45:
+	ldi r16, 1		; X offset
+	ldi r17, 1		; Y offset
+	nop
+	nop
+	rjmp vmove
+
+angle675:
+	ldi r16, 0		; X offset
+	ldi r17, 1		; Y offset
+	sbrc r26, 0		; r26 & 1 (even or odd)
+	ldi r16, 1		; Y offset
+	rjmp vmove
+
 vmove:
 	; r16 = the quantity to increment (or decrement) the ball position in the X axis
 	; r17 = the quantity to increment (or decrement) the ball position in the Y axis
@@ -1448,33 +1364,14 @@ goingright:
 	add r25, r16
 	cpi r25, 0x77
 	brlo chkrpos
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x04
 	nop
 	nop
 	rjmp endhmove
 chkrpos:
 	cpi r25, 0x74
 	brsh checkrpad
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x03
 	nop
 	nop
 	rjmp endhmove
@@ -1482,33 +1379,14 @@ goingleft:
 	sub r25, r16
 	cpi r25, 0x02
 	brsh chklpos
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x04
 	nop
 	nop
 	rjmp endhmove
 chklpos:
 	cpi r25, 0x05
 	brlo checklpad
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x03
 	nop
 	nop
 	rjmp endhmove
@@ -1516,12 +1394,7 @@ checkrpad:
 	mov r16, r26
 	sub r16, r24
 	brsh chkrpadpos
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x02
 	nop
 	rjmp endhmove
 chkrpadpos:
@@ -1538,17 +1411,11 @@ rpadhit:
 	ldi r16, 0x05
 	add r19, r16
 	rjmp endhmove
-
 checklpad:
 	mov r16, r26
 	sub r16, r23
 	brsh chklpadpos
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x02
 	nop
 	rjmp endhmove
 chklpadpos:
@@ -1570,18 +1437,7 @@ endhmove:
 	; check for goals
 	cpi r25, 0x02
 	brlo leftgoal
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x04
 	rjmp chkrightgoal
 leftgoal:
 	ldi r16, 0x01
@@ -1603,18 +1459,7 @@ chkrightgoal5togo:
 chkrightgoal:
 	cpi r25, 0x77
 	brsh rightgoal
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x04
 	rjmp random
 rightgoal:
 	ldi r16, 0x01
@@ -1647,18 +1492,7 @@ lfsr:
 	; if a pad was hit, change random offsets
 	cpi r19, 0x0A
 	brlo randomoffset
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x04
 	nop
 	rjmp endrandomoffset
 randomoffset:
@@ -1684,6 +1518,7 @@ randomoffsetleft:
 endrandomoffset:
 
 	; check if the ball hit the paddle
+	lds r18, 0x0061
 	cpi r19, 0xFF
 	brne hit
 	rjmp nohit
@@ -1738,18 +1573,7 @@ hit1:
 	lds r16, 0x0062	; load ball flags
 	sbr r16, 0x02
 	sts 0x0062, r16	; save ball flags
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x04
 	rjmp movepads
 
 hit2:
@@ -1878,80 +1702,21 @@ hit5:
 	lds r16, 0x0062	; load ball flags
 	cbr r16, 0x02
 	sts 0x0062, r16	; save ball flags
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x04
 	rjmp movepads
 
 nohit:
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x06
 	nop
 	nop
 
 paddlefixed:
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
+	delay3x 0x0B
 	rjmp movepads
 
 movepads:
-	; TODO: demo, move the paddle in ball's direction
+	; 59 CYCLES from here to updatepadend
+	; move the paddle in ball's direction
 	lds r19, 0x0062	; load ball flags
 	sbrs r19, 0
 	rjmp moverpad
@@ -1990,18 +1755,19 @@ lpadcont:
 	rjmp spendandgo
 
 moverpad:
-	mov r18, r23	; r18 = previous left paddle position
-	mov r19, r24	; r19 = previous right paddle position
-	lds r17, 0x006B	; load random offset
-	mov r16, r24	; right paddle position
-	add r16, r17
-	cp r26, r16		; compare ball Y position with middle of the paddle
-	brlo rpadup
-	breq rpadfix
-	; TODO: replace following instruction with a nop to temporarely inactive right paddle for tests
-	inc r24 ; add r24, r18
-	cpi r24, 0x5A
-	brsh setmaxrpad
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
 	nop
 	nop
 	rjmp spendandgo
@@ -2031,7 +1797,7 @@ spendandgo:
 	lds r16, 0x0066	; left paddle direction counter
 	inc r16
 	sts 0x0066, r16
-	cpi r16, 0x0A	; maximum delay to remember paddle's direction
+	cpi r16, 0xFA	; maximum delay to remember paddle's direction
 	brsh setlpadfix
 	nop
 	nop
@@ -2067,7 +1833,7 @@ updaterpad:
 	lds r16, 0x0067	; left paddle direction counter
 	inc r16
 	sts 0x0067, r16
-	cpi r16, 0x0A	; maximum delay to remember paddle's direction
+	cpi r16, 0x4A	; maximum delay to remember paddle's direction
 	brsh setrpadfix
 	nop
 	nop
@@ -2100,8 +1866,96 @@ resetrpadcount:
 updatepadend:
 
 	; spending remaining cycles
-	ldi r16, 0x5B
-loopmb2:
-	dec r16
-	brne loopmb2
+	delay3x 0x61
+	nop
+	rjmp loop
+
+chkinput:
+	nop
+	nop
+	nop
+	nop
+	nop
+	; Sync pulse length 3.77 µs = 75.4 cycles
+	; HSYNC pulse on
+	sbi PORT, HSYNC		; sbi = 2 clocks
+
+	delay3x 0x18
+	; HSYNC pulse off
+	cbi PORT, HSYNC		; cbi = 2 clocks
+	; Back porch 37.8 cycles + draw line 503.4 cycles
+	; So we have a total of 541.2 cycles to calculate the ball location
+
+	; read input button
+	lds r19, 0x0094 	; read button pressed counter
+	mov r17, r19
+
+	in r18, _SFR_IO_ADDR(PINB)
+	sbrs r18, INPUT
+	mov r19, r22		; button released, clear counter
+	inc r19				; increment counter
+
+	; 22 CYCLES from here to the sts in savebutton
+	cpi r19, 0xB6
+	brsh maxlimit
+	cpi r19, 0x01
+	breq chkrelease
+	rjmp movepad
+maxlimit:
+	ldi r19, 0xB5
+	rjmp movepad
+movepad:
+	lds r16, 0x006C
+	cpi r16, 0x01
+	breq paddown
+	dec r24
+	cpi r24, 0x5A
+	brsh minpadup
+	nop
+	nop
+	nop
+	rjmp savebutton
+minpadup:
+	ldi r24, 0x00
+	nop
+	rjmp savebutton
+paddown:
+	inc r24
+	cpi r24, 0x5A
+	brsh maxpaddown
+	nop
+	nop
+	rjmp savebutton
+maxpaddown:
+	ldi r24, 0x5A
+	rjmp savebutton
+chkrelease:
+	cpi r17, 0x02
+	brsh justreleased
+	; button still released
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	rjmp savebutton
+justreleased:
+	; invert paddle direction
+	lds r16, 0x006C
+	ldi r17, 0x01
+	eor r16, r17
+	sts 0x006C, r16
+	nop
+	rjmp savebutton
+savebutton:
+	sts 0x0094, r19		; save button pressed counter
+
+	; spending remaining cycles
+	delay3x 0xA9
+	nop
 	rjmp loop
